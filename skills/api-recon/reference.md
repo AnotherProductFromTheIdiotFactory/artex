@@ -1,28 +1,28 @@
-# api-recon — 参考手册
+# api-recon reference manual
 
-Grep 配方、`config.json` 模板与排障。所有 grep 针对 `js/` 目录执行。bundle 单行时可先 `js-beautify` 或 `sed 's/}/}\n/g'`，通常带上下文窗口的 raw grep 即可。
+Grep recipes, a `config.json` template, and troubleshooting guidance. Run every grep against the `js/` directory. For a single-line bundle, `js-beautify` or `sed 's/}/}\n/g'` may help, although raw grep with bounded context is usually sufficient.
 
-## 脚本说明
+## Script notes
 
-`scripts/` 内所有文件均为**参考模板**，执行前必须按目标站点调整。典型改动点：
+Every file under `scripts/` is a **reference template** and must be adapted to the target before execution.
 
-| 脚本 | 常见需调整项 |
+| Script | Common target-specific changes |
 |---|---|
-| `harvest_static.py` | endpoint 正则、webpack/Vite manifest 解析、微前端 publicPath、重试/并发 |
-| `runtime_harvest.js` | neutralize 字段名与成功值、stub 匹配规则与 body 结构、routes 来源、WS 录制、`waitUntil`/`routeTimeout`/`proxy` |
-| `preload.js` | `loginPathRe`、L1 stubs、`neutralize.fields`、`apiPattern`、是否启用 L3、`recordDetail`、`observe.*`、`neutralizeVueRouter` |
-| `spider_mpa.py` | `--exclude` 破坏性链接、cookie、depth/max、同域过滤 |
-| `extract_route_map.py` | `routeMap` / `routeLink` 正则、KEY 命名模式 |
-| `build_perm_tree.py` | `userRouteAuth` 解析、`ROOTS`/`PREFIX_PARENT` 层级启发式、stub 外层字段名 |
-| `config.json` | 以上全部站点专属参数的统一入口 |
+| `harvest_static.py` | Endpoint regex, webpack/Vite manifest handling, micro-frontend `publicPath`, retries, and concurrency |
+| `runtime_harvest.js` | Neutralized fields and success values, stub matching and body shape, route sources, WebSocket recording, `waitUntil`, `routeTimeout`, and `proxy` |
+| `preload.js` | `loginPathRe`, L1 stubs, `neutralize.fields`, `apiPattern`, L3 enablement, `recordDetail`, `observe.*`, and `neutralizeVueRouter` |
+| `spider_mpa.py` | Destructive-link exclusions, cookie, depth/max limits, and same-origin filtering |
+| `extract_route_map.py` | `routeMap` / `routeLink` regex and key-naming conventions |
+| `build_perm_tree.py` | `userRouteAuth` parsing, `ROOTS`/`PREFIX_PARENT` hierarchy heuristics, and outer stub fields |
+| `config.json` | The shared entry point for all target-specific settings above |
 
-调整后的文件建议放在任务工作目录（如 `recon/`），报告中注明相对参考脚本的具体改动。
+Put adapted files in the task workspace, for example `recon/`, and document every difference from the templates in the final report.
 
 ---
 
-## A. 逆向三道门
+## A. Reverse the three gates
 
-### A1. 渲染门 — 「如何判断已登录？」
+### A1. Render gate — How does the client decide the user is logged in?
 
 ```bash
 grep -rhoaE '.{0,40}(isLogin|isAuthenticated|loggedIn|hasLogin|requireAuth)\b.{0,80}' js | head
@@ -32,19 +32,19 @@ grep -rhoaE '(Cookies?|cookie)\.(get|load)\("[^"]+"\)' js | sort -u
 grep -rhoaE '\batob\(|JSON\.parse\(|jwt|decode' js | head
 ```
 
-找链路 `isLogin = f(getUser())` → `getUser = decode(storage.read(KEY))`，确定 **存储键**、**容器**（Cookie vs localStorage）、**编码**：
+Trace a chain such as `isLogin = f(getUser())` to `getUser = decode(storage.read(KEY))`. Determine the **storage key**, **container** (Cookie or localStorage), and **encoding**.
 
-| 编码 | config 伪造方式 |
+| Encoding | Configuration value used for the mock |
 |---|---|
-| 明文字符串 / `"1"` / token | `"value": "anything-truthy"` |
+| Plain string, `"1"`, or token | `"value": "anything-truthy"` |
 | `JSON.parse(x)` | `"value": "json:{\"id\":1,\"username\":\"admin\"}"` |
 | `JSON.parse(atob(x))` | `"value": "b64json:{\"id\":1,\"username\":\"admin\"}"` |
-| JWT | 无签名/`alg:none` JWT，或 bundle 内密钥签名 |
-| 加密（SM2/AES/RSA） | 找硬编码密钥；渲染门仅需可解码 blob 时可 forge；否则静态兜底 |
+| JWT | An unsigned/`alg:none` JWT, or one signed with a key embedded in the bundle |
+| SM2/AES/RSA or similar encryption | Look for embedded keys. Forge only when the render gate merely needs a decodable blob; otherwise use static fallback. |
 
-→ 写入 `cookies` / `localStorage`。
+Record the result in `cookies` or `localStorage`.
 
-### A2. 拦截器门 — 「什么触发跳 /login？」
+### A2. Interceptor gate — What causes navigation to `/login`?
 
 ```bash
 grep -rhoaE '.{0,60}(interceptors\.response|axios|request\.use).{0,120}' js | head
@@ -53,15 +53,15 @@ grep -rhoaE '.{0,40}(未登录|请重新登录|登录已过期|unauthorized|登�
 grep -rhoaE '.{0,30}(location\.href|router\.(push|replace)|navigate)\([^)]*login[^)]*\)' js | head
 ```
 
-确定：**字段名**、**成功值**（通常 `0` 或 `200`）、**触发跳转的失败值**。用 junk session 验证：
+Determine the response **field name**, the **success value** (commonly `0` or `200`), and the failure values that trigger a redirect. Validate using a junk session only:
 
 ```bash
 curl -sk -X POST -H 'Cookie: <fakekey>=junk' https://target/api/<protected> -d '{}' -H 'Content-Type: application/json'
 ```
 
-→ 写入 `neutralize.fields` + `neutralize.success`。
+Record the result in `neutralize.fields` and `neutralize.success`.
 
-### A3. 内容门 — 「菜单/权限从哪来？」
+### A3. Content gate — Where do menus and permissions come from?
 
 ```bash
 grep -rhoaE '"/api[^"]*(permission|perm|role|menu|acl|resource|nav)[^"]*"' js | sort -u
@@ -70,24 +70,22 @@ grep -rhoaE 'userRouteAuth|getResultTree|routeMap|routeLink|hasPermission|checkA
 grep -rhoaE '([A-Z_][A-Z0-9_]*):\{name:"[^"]*",link:"/[^"]+"\}' js | head
 ```
 
-**两层数据**（常见企业后台）：
+Many enterprise applications use two permission layers:
 
-| API | 典型 payload | 消费方 |
+| Source | Typical payload | Consumer |
 |---|---|---|
-| `.../role_permissions` | `{ permissions: string[], role_type }` | 路由守卫、按钮级 ACL |
-| `.../permissions/all` | `tree[{ code, position, children }]` | 侧栏菜单渲染 |
-| bundle 内 `userRouteAuth` | `{ CODE: { url, name? } }` | code → 前端 path |
-| bundle 内 `routeMap` | `{ KEY: { name, link } }` | 别名解析（webpack `o.DASHBOARD`） |
+| `.../role_permissions` | `{ permissions: string[], role_type }` | Route guards and control-level ACLs |
+| `.../permissions/all` | `tree[{ code, position, children }]` | Sidebar menu rendering |
+| Bundle `userRouteAuth` | `{ CODE: { url, name? } }` | Permission code to frontend path |
+| Bundle `routeMap` | `{ KEY: { name, link } }` | Alias resolution such as webpack `o.DASHBOARD` |
 
-读消费方代码确认：`getResultTree(tree, permissions)` 如何过滤、`v-if` / `hasAuth(code)` 检查哪个字段。
+Read the consumer to learn how `getResultTree(tree, permissions)` filters entries and which field `v-if` or `hasAuth(code)` checks.
 
-**手工 forge**（小站点）：构建 permissive payload → `stubs`。
-
-**完整权限树还原**（大站点，侧栏/子模块仍空白）：见 **I 节**。
+For a small site, manually construct a permissive payload and add it to `stubs`. For a large site whose sidebar or modules remain blank, follow section I to restore the complete permission tree.
 
 ---
 
-## B. config.json 模板
+## B. `config.json` template
 
 ```json
 {
@@ -150,18 +148,19 @@ grep -rhoaE '([A-Z_][A-Z0-9_]*):\{name:"[^"]*",link:"/[^"]+"\}' js | head
 }
 ```
 
-字段说明：
-- `runtimeMode`：`depth`（Puppeteer）、`coverage`（browser MCP）、`both`
-- `cookies[].value` 前缀：`b64json:` → base64(JSON)；`json:` → 原始 JSON；无前缀 → 字面量
-- `forward: true` 转发真实请求并改写码字段；`false` 完全离线 stub
-- `mockTier`：coverage 模式 preload 启用层级，如 `L1+L2`、`L1+L2+L3`
-- `routes` 来自 `routes.txt`；forge 菜单后 harness 自动追加 `<a href>`
-- `captureResponses` / `recordWs` 仅 depth 模式有效
-- `waitUntil`：大型 SPA 用 `domcontentloaded`，避免 `networkidle2` 挂起
-- `routeTimeout`：单路由 `page.goto` 超时（毫秒）
-- `proxy`：Puppeteer `--proxy-server`；也可设 `HTTP_PROXY` / `HTTPS_PROXY`
+Field notes:
 
-### B1. 双 stub 模板（role_permissions + permissions/all）
+- `runtimeMode`: `depth` (Puppeteer), `coverage` (browser MCP), or `both`.
+- `cookies[].value` prefixes: `b64json:` means base64-encoded JSON; `json:` means raw JSON; no prefix means a literal.
+- `forward: true` forwards the real request and rewrites the code field; `false` uses fully offline stubs.
+- `mockTier` selects preload layers in coverage mode, such as `L1+L2` or `L1+L2+L3`.
+- `routes` comes from `routes.txt`; after a forged menu is mounted, the harness also adds `<a href>` values.
+- `captureResponses` and `recordWs` apply only in depth mode.
+- For large SPAs, use `waitUntil: domcontentloaded` to avoid a `networkidle2` hang.
+- `routeTimeout` is the per-route `page.goto` timeout in milliseconds.
+- `proxy` becomes Puppeteer's `--proxy-server`; `HTTP_PROXY` and `HTTPS_PROXY` are also supported.
+
+### B1. Dual-stub template (`role_permissions` and `permissions/all`)
 
 ```json
 "stubs": [
@@ -193,13 +192,13 @@ grep -rhoaE '([A-Z_][A-Z0-9_]*):\{name:"[^"]*",link:"/[^"]+"\}' js | head
 ]
 ```
 
-外层字段名（`response_code` / `code` / `data`）须与 A2 拦截器门一致；`permissions` 须覆盖 tree 中所有 leaf code。
+The outer field names (`response_code`, `code`, and `data`) must match the A2 interceptor gate. `permissions` must cover every leaf code in the tree.
 
 ---
 
-## C. coverage 模式：preload 配置
+## C. Coverage mode: preload configuration
 
-编辑 `scripts/preload.js` 顶部 `CONFIG` 对象，或通过 CDP 注入前替换：
+Edit the `CONFIG` object at the top of `scripts/preload.js`, or replace it before CDP injection:
 
 ```javascript
 const CONFIG = {
@@ -211,14 +210,14 @@ const CONFIG = {
   neutralizeVueRouter: true,
   observe: { storageReads: false, cookieReads: false, xhrHeaders: true },
   neutralize: { fields: ['response_code', 'code'], success: 0 },
-  stubs: [ /* 同 config.json stubs */ ],
+  stubs: [ /* same entries as config.json stubs */ ],
   apiPattern: /\/(api|apis|v\d+|dev|internal|graphql)\//i,
 };
 ```
 
-验证：`window.__API_RECON_PRELOAD__ === true` 且 pathname 稳定。
+Verify `window.__API_RECON_PRELOAD__ === true` and that the pathname remains stable.
 
-导出录制结果：
+Export the recorded results:
 
 ```javascript
 JSON.stringify({
@@ -231,27 +230,25 @@ JSON.stringify({
 
 ---
 
-## D. preload / runtime Hook 能力
+## D. Preload and runtime hook coverage
 
-preload（coverage）与 runtime_harvest（depth）内置的浏览器 Hook 能力及覆盖范围：
-
-| Hook 能力 | 对 API 发现的价值 | 覆盖 |
+| Hook capability | Recon value | Coverage |
 |---|---|---|
-| Hook fetch / XHR.open | 录请求 URL/方法 | ✅ `recordDetail` + `__API_RECON_LOG__` |
-| Hook XHR.setRequestHeader | 发现 Authorization 等头 | ✅ `observe.xhrHeaders` |
-| Hook localStorage/cookie 读 | 确认会话键名 | ⚠️ 可选 `observe.storageReads/cookieReads` |
-| Vue 获取路由 | 补全 frontendRoutes | ✅ `__API_RECON_ROUTES__`（已加载路由） |
-| Vue 路由守卫中和 / 登录跳转阻断 | 撑开模块触发 API | ✅ `neutralizeVueRouter` + 原生跳转中和 |
-| React 获取路由 | 补路由 | ⚠️ 静态 + 点击；无专用 Hook |
-| 页面跳转阻断（登录 path） | 留页分析 | ⚠️ 仅阻断登录 path，避免挡业务导航 |
-| Hook 加密库（CryptoJS/SM 等） | 加密参数 → 明文 API body | ❌ 须手工 Hook 加密函数入参；结论写 config |
-| 反调试 bypass | 否则 runtime 录不到 API | ❌ 须手工处理；静态仍可用 |
+| Hook fetch and `XHR.open` | Record request URLs and methods | Supported through `recordDetail` and `__API_RECON_LOG__` |
+| Hook `XHR.setRequestHeader` | Discover Authorization and similar headers | Supported through `observe.xhrHeaders` |
+| Hook localStorage and cookie reads | Confirm session-key names | Optional through `observe.storageReads/cookieReads` |
+| Obtain Vue routes | Complete `frontendRoutes` | `__API_RECON_ROUTES__` for loaded routes |
+| Neutralize Vue guards and login redirects | Mount modules so they emit APIs | `neutralizeVueRouter` plus native-navigation neutralization |
+| Obtain React routes | Complete routes | Static analysis and clicks; no dedicated hook |
+| Block page navigation to login | Keep the page available for analysis | Only blocks the login path so business navigation still works |
+| Hook CryptoJS, SM, or similar encryption | Recover plaintext API bodies before encryption | Must be implemented manually; document the hook in the configuration |
+| Anti-debugging bypass | Needed when runtime instrumentation is blocked | Must be implemented manually; static analysis remains available |
 
 ---
 
-## E. Endpoint 提取正则（静态过少时）
+## E. Endpoint regex when static output is too small
 
-在 `harvest_static.py` 的 `extract_endpoints` 放宽，或手动：
+Broaden `extract_endpoints` in `harvest_static.py`, or use:
 
 ```bash
 grep -rhoaE '"/[a-z][A-Za-z0-9_/\-]{3,}"' js | sort -u
@@ -260,60 +257,60 @@ grep -rhoaE '/api/[a-zA-Z0-9_./-]+' js | sort -u
 
 ---
 
-## F. 排障
+## F. Troubleshooting
 
-| 现象 | 原因 → 处理 |
+| Symptom | Likely cause and response |
 |---|---|
-| 静态 API 很少 | endpoint 方言不匹配 → 放宽正则（D 节） |
-| chunk 数 ≪ manifest | CSS-only 或未部署 chunk；404 已重试 |
-| runtime 仍显示登录页 | 渲染门错误 → 复查 A1：键名、容器、编码、domain |
-| 进壳但模块空白 | 内容门 → forge 菜单（A3）；`routes` path 可能不对 |
-| 每路由只有 bootstrap/locale | 权限码不全 → I 节权限树还原；检查 `role_permissions` + `permissions/all` 双 stub |
-| 侧栏有项但子页空白 | tree 缺 intermediate 节点或 code 与 `userRouteAuth` 不一致 |
-| 每个 API 都跳登录 | 拦截器门 → 确认 `neutralize`；嵌套字段需扩展 walk 逻辑 |
-| WS 帧为 0 | 需用户交互后才 subscribe；加长 `perRouteMs` |
-| 响应体空 | 仅 `forward: true` 时有真实响应 |
-| Chromium 缺失 | 安装 chromium 或设置 `config.chromium` / `CHROMIUM` |
-| Mock 很多仍回登录 | Hook 太晚或缺 `location.href` setter → document-start + preload |
-| 列表全空 | L3 空数组正常；继续点 Tab/设置/详情 |
-| 误把 Redux action 当路由 | 过滤含 get/set/change/clear/toggle/upload 的内部 path |
-| Vue 仍跳登录 | preload 非 document-start → 改注入时机；或 `neutralizeVueRouter: false` 时手动清守卫 |
-| 响应里有 URL 但未进 log | 开 `extractUrlsFromResponse`；或从 `__API_RECON_DETAIL__` 人工提取 |
-| 不知 Authorization 头名 | 开 `observe.xhrHeaders` 或 DevTools 查看请求头 |
-| runtime 极慢 / 超时 | 改 `waitUntil: domcontentloaded`；降 `routeTimeout`；勿用 `networkidle2` |
-| 代理连接失败 | 检查 `proxy` / 环境变量；Puppeteer 与 curl 代理端口一致 |
+| Very few static APIs | Endpoint dialect mismatch; broaden the section E regex |
+| Chunk count is much smaller than the manifest | Some chunks are CSS-only or undeployed; ensure 404 retries completed |
+| Runtime still shows login | Recheck A1 storage key, container, encoding, and domain |
+| Shell loads but modules are blank | Content gate failed; forge the A3 menu and verify route paths |
+| Every route has only bootstrap/locale traffic | Permission codes are incomplete; restore the section I tree and check both stubs |
+| Sidebar exists but child pages are blank | Tree lacks intermediate nodes or codes disagree with `userRouteAuth` |
+| Every API redirects to login | Recheck `neutralize`; nested code fields may require recursive walking |
+| No WebSocket frames | Subscription may require interaction; increase `perRouteMs` |
+| Empty response bodies | Real response bodies exist only with `forward: true` |
+| Chromium missing | Install Chromium or set `config.chromium` / `CHROMIUM` |
+| Many mocks but still redirected | Hook ran too late or lacks a `location.href` setter; inject preload at document start |
+| Lists are empty | Expected with L3 empty arrays; continue through tabs, settings, and details |
+| Redux actions mistaken for routes | Exclude internal paths containing get/set/change/clear/toggle/upload |
+| Vue still redirects | Inject preload at document start, or manually remove guards when `neutralizeVueRouter` is false |
+| Response contains URLs absent from the log | Enable `extractUrlsFromResponse` or inspect `__API_RECON_DETAIL__` |
+| Authorization header name unknown | Enable `observe.xhrHeaders` or inspect DevTools request headers |
+| Runtime is extremely slow or times out | Use `waitUntil: domcontentloaded`, reduce `routeTimeout`, and avoid `networkidle2` |
+| Proxy connection fails | Verify `proxy` and environment variables; Puppeteer and curl must use the same proxy port |
 
 ---
 
-## G. hardened 目标
+## G. Hardened targets
 
-服务端逐步校验会话（不可 forge 的签名 cookie、服务端渲染且不可 stub 的菜单）时，runtime 会在 shell 处卡住。预期行为：
+Runtime may stop at the login shell when the server progressively validates sessions, for example with an unforgeable signed cookie or server-rendered menu that cannot be stubbed.
 
-- **静态足够做 endpoint 枚举** — 模块 path 在代码里
-- 若授权允许，用**真实会话**跑同一 harness：`forward: true`、无需 neutralize，捕获真实 methods/params/responses
-
----
-
-## H. 单次任务清单
-
-1. 确认授权范围
-2. **阅读** `scripts/harvest_static.py` → 按目标调整 → 运行 → 审 `api_static.txt`、`routes.txt`
-3. **Phase 1b**：path 锚点扩窗 + 绑定层 → `param_candidates.json`（J 节）
-4. 逆向 A1/A2/A3 → 写站点专属 `config.json`
-5. **阅读并调整** `runtime_harvest.js` / `preload.js` 后再执行
-6. `runtimeMode=depth`：`npm install` → 运行调整后的 harvest 脚本
-7. `runtimeMode=coverage/both`：document-start 注入调整后的 preload → browser MCP 动态枚举 + **参数触发矩阵**
-8. 模块不渲染 → **I 节权限树还原** → patch stubs → 重跑
-9. 参数多样本 diff + 错误反推 → `params_merged.json`
-10. 合并 → `site_map.json` + `api_merged.txt`，诚实标注覆盖、缺口及脚本改动点
+- Static analysis remains sufficient for endpoint enumeration because module paths are still present in code.
+- If the authorization permits use of a real session, run the same harness with `forward: true` and no neutralization to capture real methods, parameters, and responses.
 
 ---
 
-## I. 权限树还原（Phase 4 深化）
+## H. Per-task checklist
 
-当 forge 简单 `menus: [{ path, show: true }]` 无效、子模块仍不 mount 时使用。
+1. Confirm the authorized scope.
+2. Read and adapt `scripts/harvest_static.py`, run it, and review `api_static.txt` and `routes.txt`.
+3. Complete Phase 1b: expand around path anchors and follow the binding layer into `param_candidates.json` using section J.
+4. Reverse A1, A2, and A3 and write a target-specific `config.json`.
+5. Read and adapt `runtime_harvest.js` and `preload.js` before executing either.
+6. For `runtimeMode=depth`, run `npm install`, then run the adapted harvester.
+7. For `runtimeMode=coverage/both`, inject the adapted preload at document start, then perform browser MCP enumeration and the parameter trigger matrix.
+8. If modules do not render, restore the section I permission tree, patch the stubs, and rerun.
+9. Compare multiple parameter samples and infer from errors into `params_merged.json`.
+10. Merge into `site_map.json` and `api_merged.txt`, accurately documenting coverage, gaps, and template changes.
 
-### I1. 定位 auth 模块
+---
+
+## I. Permission-tree restoration (expanded Phase 4)
+
+Use this when a simple forged `menus: [{ path, show: true }]` does not mount child modules.
+
+### I1. Locate the authentication module
 
 ```bash
 grep -l 'userRouteAuth' js/*.js
@@ -321,88 +318,91 @@ grep -l 'routeMap\|routeLink' js/*.js
 grep -rhoaE 'getResultTree|role_permissions|permissions/all' js | head
 ```
 
-记录：**权限 API path**、**响应字段名**、**消费 chunk 文件名**。
+Record the permission API paths, response-field names, and consuming chunk filenames.
 
-### I2. 提取 routeMap
+### I2. Extract `routeMap`
 
 ```bash
 python3 scripts/extract_route_map.py recon/js recon/
-# 产出 recon/route_map.json
+# Produces recon/route_map.json
 ```
 
-若 `[!] no routeMap pattern found`：放宽 `extract_route_map.py` 中正则，或手工 grep：
+If it reports `[!] no routeMap pattern found`, broaden the regex in `extract_route_map.py` or use:
 
 ```bash
 grep -rhoaE '([A-Z_][A-Z0-9_]*):\{name:"[^"]*",link:"/[^"]+"\}' js | head -20
 ```
 
-### I3. 构建权限树 + stub
+### I3. Build the permission tree and stubs
 
 ```bash
 python3 scripts/build_perm_tree.py recon/js recon/ --config recon/config.json
 ```
 
-脚本逻辑：
-1. 解析 `userRouteAuth={MONITOR:{url:...},...}`（含 webpack 别名 `He=o.DASHBOARD`）
-2. 用 `route_map.json` 解析 alias → 真实 path
-3. 按 code 前缀推断 parent（`MONITOR_ALERT` → `MONITOR`）
-4. 输出 `permissions_tree.json`、`permissions_all_stub.json`、`role_permissions_stub.json`
-5. `--config` 时自动写入 `config.json` 的 `stubs` 与扩展 `routes`
+The script:
 
-**按目标调整**（在脚本顶部）：
-- `DEFAULT_ROOTS`：顶级模块 code 列表
-- `DEFAULT_PREFIX_PARENT`：`PREFIX_` → parent 映射
-- `DEFAULT_EXTRA_PARENT`：非前缀关系的 orphan 节点
+1. Parses `userRouteAuth={MONITOR:{url:...},...}`, including aliases such as `He=o.DASHBOARD`.
+2. Uses `route_map.json` to resolve aliases to real paths.
+3. Infers parents from code prefixes, for example `MONITOR_ALERT` to `MONITOR`.
+4. Writes `permissions_tree.json`, `permissions_all_stub.json`, and `role_permissions_stub.json`.
+5. With `--config`, updates `config.json` stubs and extends `routes`.
 
-### I4. 校验 stub 一致性
+Adapt these constants at the top of the script:
+
+- `DEFAULT_ROOTS`: top-level module codes.
+- `DEFAULT_PREFIX_PARENT`: `PREFIX_` to parent mappings.
+- `DEFAULT_EXTRA_PARENT`: orphan nodes whose parent does not follow a prefix rule.
+
+### I4. Validate stub consistency
 
 ```bash
-# permissions 数量应 ≈ userRouteAuth 条目数
+# Permission count should be approximately the userRouteAuth entry count.
 wc -l recon/perm_codes_all.txt
-# routes 应覆盖 route_map 全部 link
+# Routes should cover every route_map link.
 python3 -c "import json; m=json.load(open('recon/route_map.json')); r=set(json.load(open('recon/config.json'))['routes']); print('missing', [v['link'] for v in m.values() if v['link'] not in r])"
 ```
 
-### I5. 重跑 runtime 并对比
+### I5. Rerun and compare runtime results
 
 ```bash
 node recon/runtime_harvest.js recon/config.json
-# 对比 forge 前后 runtime_api.json 条数；检查 /attack、/asset 等是否出现模块 API
+# Compare runtime_api.json counts before and after forging, and check whether
+# module APIs appear for routes such as /attack and /asset.
 ```
 
-| forge 前 | forge 后（成功） |
+| Before successful forging | After successful forging |
 |---|---|
-| 每路由相同 3–5 条 bootstrap | 不同路由触发不同 module API |
-| 仅 `/api/locale/language` | 出现 `/api/web/...` 模块 endpoint |
-| `routes.txt` 个位路由 | `routes` 80–110+ 来自 route_map |
+| Every route has the same three to five bootstrap calls | Different routes trigger different module APIs |
+| Only `/api/locale/language` appears | `/api/web/...` module endpoints appear |
+| `routes.txt` has only a few routes | Configuration receives 80–110 or more route-map links |
 
-### I6. 仍失败时
+### I6. If restoration still fails
 
-- **coverage 模式**：点击侧栏 + Tab，权限 gating 可能在交互后才请求
-- **stub 字段**：对比真实 API（curl + 真实 session）与 stub 的 nesting
-- **额外守卫**：grep `hasPermission|checkRole|func.` 等按钮级检查，扩展 `role_permissions.permissions`
-- **静态兜底**：模块 API path 仍在 `api_static.txt`，runtime 仅补 METHOD/body；参数保留 `param_candidates.json` + 已录样本
+- In coverage mode, click the sidebar and tabs because permission checks may run only after interaction.
+- Compare real authorized API nesting with stub nesting.
+- Grep `hasPermission`, `checkRole`, `func.`, and similar control-level guards; extend `role_permissions.permissions`.
+- Use static fallback: module paths remain in `api_static.txt`; runtime adds methods and bodies. Preserve untriggered candidates in `param_candidates.json`.
 
 ---
 
-## J. 参数逆向（Phase 1b / 5b / 5c）
+## J. Parameter reconstruction (Phases 1b, 5b, and 5c)
 
-**方法论，非通用脚本。** 找 path 用正则；找参数用锚点扩窗 + UI 绑定链 + 多样本 diff + 错误反推。
+This is a method, not a universal script. Find paths with regex; find parameters through anchor context, UI bindings, multi-sample comparison, and error inference.
 
-### J1. 锚点扩窗 — 从 path 找组包对象
+### J1. Expand from a path anchor to the payload object
 
 ```bash
-# 以 Phase 1 已知 path 为锚
+# Anchor on a path discovered in Phase 1.
 grep -n '"/api/user/list"' js/*.js
 grep -rhoaE '.{0,120}("/api[^"]+").{0,200}' js | head
 grep -rhoaE '(params|data|body|payload)\s*:\s*\{' js | head
 grep -rhoaE '(get|post|put|delete|patch)\([^,]+,\s*\{' js | head
 ```
 
-### J2. 包装层与传输形态
+### J2. Wrappers and transport forms
 
 ```bash
-# axios / 统一 request
+# Axios or a shared request wrapper
 grep -rhoaE '(axios|request)\.(get|post|put|delete|patch)\(' js | head
 grep -rhoaE 'interceptors\.(request|response)' js | head
 
@@ -410,15 +410,15 @@ grep -rhoaE 'interceptors\.(request|response)' js | head
 grep -rhoaE '(query|mutation)\s+\w+|gql`|graphql\(' js | head
 grep -rhoaE '\$[a-zA-Z_]+\s*:\s*(Int|String|Boolean|\[)' js | head
 
-# FormData / multipart
+# FormData and multipart
 grep -rhoaE 'FormData|\.append\(' js | head
 
-# 路径参数
+# Path parameters
 grep -rhoaE 'path:\s*"/[^"]*:[^"]+"' js | head
 grep -rhoaE 'useParams|route\.params|\$route\.params' js | head
 ```
 
-### J3. 校验门 — 必填 / 格式 / 枚举
+### J3. Validation gate: required fields, format, and enumeration
 
 ```bash
 grep -rhoaE '(required|message|pattern|enum|validator)\s*:' js | head
@@ -427,74 +427,74 @@ grep -rhoaE 'rules\s*:\s*\[|name:\s*["\'][a-zA-Z_]+["\']' js | head
 grep -rhoaE 'label.*value|options\s*:\s*\[' js | head
 ```
 
-### J4. 绑定层 — 表单 → API
+### J4. Binding layer: form to API
 
 ```bash
 grep -rhoaE 'onFinish|handleSubmit|getFieldsValue|validateFields' js | head
 grep -rhoaE '(pick|omit|transform|dayjs|moment)\(' js | head
 ```
 
-runtime 补位：DevTools → Network → 请求 → **发起程序**（call stack）从 `fetch`/`send` 往上追组包函数。
+At runtime, follow DevTools Network request initiators upward from `fetch` or `send` to the payload builder.
 
-### J5. 加密参数
+### J5. Encrypted parameters
 
 ```bash
 grep -rhoaE 'encrypt|decrypt|sign|CryptoJS|sm2|sm3|sm4|RSA|AES' js | head
 ```
 
-**勿在密文上猜字段** — Hook 加密函数**入参**，在加密前录 plaintext payload；结论写 `config.json` / `param_candidates.json`。
+Do not guess fields from ciphertext. Hook the encryption function's **input** and record the plaintext payload before encryption. Document the result in `config.json` or `param_candidates.json`.
 
-### J6. 参数触发矩阵（Phase 3 必做）
+### J6. Parameter trigger matrix (required in Phase 3)
 
-对每模块按操作各录一次，diff 请求 body/query：
+Record each action type for each module and compare body/query samples:
 
-| 操作 | 关注 |
+| Action | Evidence to compare |
 |---|---|
-| 列表首屏 | 分页默认值 |
-| 搜索 | keyword、filters |
-| 高级筛选 | optional 字段 |
-| 新建/编辑 | 完整 entity |
-| 批量/导出 | `ids[]`、`exportType` |
-| 排序/翻页 | `sortField`、`order` |
+| Initial list | Default pagination values |
+| Search | Keyword and filters |
+| Advanced filtering | Optional fields |
+| Create/edit | Complete entity |
+| Bulk/export | `ids[]` and `exportType` |
+| Sort/page | `sortField` and `order` |
 
-产出 `param_samples.json`：`[{ "path", "method", "action": "search", "body", "query", "headers" }]`
+Produce `param_samples.json` entries such as `[{ "path", "method", "action": "search", "body", "query", "headers" }]`.
 
-### J7. 置信度规则
+### J7. Confidence rules
 
-| 置信度 | 条件 |
+| Confidence | Condition |
 |---|---|
-| **高** | 静态 callsite + runtime ≥2 样本一致 |
-| **中** | 仅静态，或仅 1 次 runtime |
-| **低** | 响应/错误反推，未二次验证 |
-| **待触发** | 静态已知字段，UI/权限未跑到 |
+| **High** | Static callsite and at least two consistent runtime samples |
+| **Medium** | Static evidence only, or one runtime sample only |
+| **Low** | Inferred from a response/error without a second validation |
+| **Not triggered** | Field is statically known but the UI or permission path was not reached |
 
-### J8. 场景快配
+### J8. Quick paths by scenario
 
-| 场景 | 顺序 |
+| Scenario | Order |
 |---|---|
-| REST 列表页 | J1 组包对象 → J6 四次 diff → J3 rules |
-| 新建/编辑表单 | J3 Form name → J4 submit 链 → runtime 提交 + 故意留空看 400 |
-| GraphQL | J2 variables 声明 → runtime 各 operation 录 variables |
-| 加密 body | J5 Hook 入参 → 加密前字段即真实 params |
+| REST list page | J1 payload object, four J6 comparisons, then J3 validation rules |
+| Create/edit form | J3 form names, J4 submit chain, runtime submission, then an intentionally omitted field to observe a 400 |
+| GraphQL | J2 variable declarations, then capture `variables` for each runtime operation |
+| Encrypted body | J5 input hook; pre-encryption fields are the real parameters |
 
-### J9. 与 api-recon 阶段映射
+### J9. Mapping to api-recon phases
 
-| api-recon | 参数 recon |
+| api-recon phase | Parameter-recon work |
 |---|---|
-| Phase 1 静态 | J1 锚点扩窗 |
-| Phase 2 A2 拦截器 | 全局注入字段（tenantId、sign） |
-| Phase 3 runtime | J6 触发矩阵 + `param_samples.json` |
-| Phase 4 权限树 | 不同模块表单不同 → 权限够才触发全字段 |
-| Phase 5 合并 | `params_merged.json` + 置信度；勿单样本定必填 |
+| Phase 1 static | J1 anchor expansion |
+| Phase 2 A2 interceptor | Global injected fields such as `tenantId` and signatures |
+| Phase 3 runtime | J6 trigger matrix and `param_samples.json` |
+| Phase 4 permission tree | Sufficient permissions are needed to trigger all module forms and fields |
+| Phase 5 merge | `params_merged.json` plus confidence; never infer required status from one sample |
 
-### J10. 排障
+### J10. Troubleshooting
 
-| 现象 | 处理 |
+| Symptom | Response |
 |---|---|
-| 静态有字段名 runtime 从未出现 | 标注「待触发」；补权限树 / 点高级筛选 / 联动 select 各 option |
-| 同 path 不同 body 形状 | 正常 — 按 `action` 分条记录，勿强行合并 schema |
-| stub 响应假但想看 params | **看 outbound 请求** body/headers，勿从 stub 响应反推 |
-| 400 报 nested field | 注意外层包装 `data`/`bizData`/`variables` |
-| GraphQL 只见 operation 名 | 展开 `variables` JSON；静态找 `$var: Type` |
+| Field is static but never appears at runtime | Mark it `not triggered`; restore permissions, open advanced filters, and exercise linked select options |
+| Same path has different body shapes | Expected; record separate entries by `action` instead of forcing one schema |
+| Response is stubbed but parameters are needed | Inspect the real outbound body and headers; do not infer from the stub response |
+| A 400 names a nested field | Account for outer `data`, `bizData`, or `variables` wrappers |
+| GraphQL shows only the operation name | Expand the `variables` JSON and locate `$var: Type` declarations statically |
 
 ---

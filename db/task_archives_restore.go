@@ -677,18 +677,18 @@ func restoreInterceptRows(tx *sql.Tx, raw json.RawMessage) error {
 			source = "unknown"
 			if row["rule_id"] != nil {
 				source = "rule"
-			} else if reason, _ := row["reason"].(string); strings.HasPrefix(reason, "[模型]") {
+			} else if reason, _ := row["reason"].(string); strings.HasPrefix(reason, modelReasonPrefix) || strings.HasPrefix(reason, legacyModelReasonPrefix) {
 				source = "model"
 			}
 			row["decision_source"] = source
 		}
 		if status, _ := row["status"].(string); status == "pending" {
 			row["status"] = "timeout"
-			row["reason"] = "任务归档期间审批已超时"
+			row["reason"] = "Approval timed out while the task was archived"
 			row["decided_at"] = time.Now().UTC()
 			if audit, ok := row["audit"].(map[string]any); ok {
 				audit["effective_action"] = "deny"
-				audit["decision_reason"] = "任务归档期间审批已超时"
+				audit["decision_reason"] = "Approval timed out while the task was archived"
 				audit["execution_status"] = "not_executed"
 			}
 		} else if audit, ok := row["audit"].(map[string]any); ok && audit["execution_status"] == "awaiting_result" {
