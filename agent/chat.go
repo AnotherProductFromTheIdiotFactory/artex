@@ -76,9 +76,9 @@ func (c *ChatAgent) SetGuard(g *guard.Guard) { c.guard = g }
 
 // chatWorkDirSpec returns a working-directory notice appended to every chat
 // agent's system prompt. Mirrors artifactSpec but without pentest-specific
-// wording ("payload", "抓响应体") that would be odd in a general assistant.
+// wording that would be odd in a general assistant.
 func chatWorkDirSpec(workDir string) string {
-	return "\n\n**文件输出规约**：需要写文件时，一律写到工作目录 " + workDir + "（这是默认 CWD，相对路径即落在这里，也可用该绝对路径）——不要写 /tmp 或其他绝对路径。"
+	return "\n\n**File-output contract:** whenever writing a file, place it inside the work directory " + workDir + ". This is the default CWD, so relative paths resolve there; that absolute path may also be used. Do not write to /tmp or any other absolute path."
 }
 
 // chatSystem renders the DB-managed prompt body for agentKey. Custom agents have
@@ -132,11 +132,11 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		DeferredTools:   def.Deferred,
 		UnlockSet:       def.Unlock,
 		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
+		EnableWebFetch:  true, // Record through the proxy and trust its CA for re-signed HTTPS.
 		WebFetchProxy:   c.proxyAddr,
 		WebFetchCACert:  c.proxyCACert,
-		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
-		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
+		// Optional web search: ddgs needs no key; brave-free and tavily need their keys.
+		// WebSearchProxy is an independent egress proxy, not the recording MITM.
 		EnableWebSearch:       ws.Enabled,
 		WebSearchBackend:      ws.Backend,
 		BraveSearchAPIKey:     ws.BraveKey,
@@ -145,20 +145,20 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		DeepSeekSearchAPIKey:  ws.DeepSeekAPIKey,
 		DeepSeekSearchModel:   ws.DeepSeekModel,
 		WebSearchProxy:        ws.Proxy,
-		BashEnv:               proxyEnv(c.proxyAddr, c.proxyCACert), // Bash 子命令默认走代理+信任 CA
+		BashEnv:               proxyEnv(c.proxyAddr, c.proxyCACert), // Route Bash through the proxy and trust its CA.
 		WorkingDir:            sessionWorkDir,
 		MaxTurns:              maxTurns,
 		MaxDuration:           maxDuration,
 		Compaction:            compactionConfig(c.window),
 		Todos:                 actool.NewTodoStore(),
 		// large tool output spills to cmd-output/ under the session dir.
-		// 截断上限用 SDK 默认(tool.Capture 的 30000 字符)。
+		// Use the SDK/tool.Capture default 30,000-character truncation limit.
 		ToolOutputDir: filepath.Join(sessionWorkDir, "cmd-output"),
-		// 命中预算(步数)→ SDK 跑收尾:输出一句总结。Prompt 与收尾轮数按本 agent key 后台可编辑
-		// (自定义 agent 各自一份;留空/0 用通用默认:10 轮)。
+		// At the turn budget, the SDK settles with a one-sentence summary. Prompt and
+		// turns are editable per agent key; empty/0 uses the generic 10-turn default.
 		Settlement:   wrapupSettlement(agentKey, nil),
-		NonStreaming: c.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:    c.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+		NonStreaming: c.nonStreaming(), // Use Provider.Complete for a non-streaming profile.
+		MaxTokens:    c.maxTokens(),    // 0 sends no cap and uses the server default.
 	}
 	if c.guard != nil {
 		opts.Hooks = c.guard.Hooks()
@@ -167,7 +167,7 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 		opts.Transcript = c.tx
 		opts.SessionID = sessionID
 	}
-	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
+	// Experimental: noa owns context compression and persists archives by SessionID.
 	enableNoa(&opts, c.noaEnabledFn, c.workDir, "chat-"+sessionID, noaWarn("chat-"+sessionID))
 	ctx = attachSideCapture(ctx, &opts)
 	s := agentcore.NewSession(opts)

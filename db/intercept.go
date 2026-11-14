@@ -37,7 +37,7 @@ type InterceptPending struct {
 	ToolInput      json.RawMessage `json:"tool_input"`
 	Status         string          `json:"status"`
 	DecisionSource string          `json:"decision_source"`
-	Reason         string          `json:"reason"` // 规则 message 或模型判定理由(前缀 [模型])
+	Reason         string          `json:"reason"` // Rule message or model verdict (prefix [Model]; localized legacy prefixes remain supported).
 	DecidedAt      *time.Time      `json:"decided_at"`
 	CreatedAt      time.Time       `json:"created_at"`
 }
@@ -225,10 +225,15 @@ func scanInterceptApprovalRow(rows interface{ Scan(...any) error }, r *Intercept
 	)
 }
 
+const (
+	modelReasonPrefix       = "[Model]"
+	legacyModelReasonPrefix = "[\u6a21\u578b]"
+)
+
 // Keep legacy rows without decision_source consistent with their displayed source.
 const approvalDecisionSource = `COALESCE(NULLIF(ip.decision_source,''), CASE
  WHEN ip.rule_id IS NOT NULL THEN 'rule'
- WHEN ip.reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END)`
+ WHEN ip.reason LIKE '` + modelReasonPrefix + `%' OR ip.reason LIKE '` + legacyModelReasonPrefix + `%' THEN 'model' ELSE 'unknown' END)`
 
 const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, ip.agent_name,
        ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ` + approvalDecisionSource + `,
@@ -248,7 +253,7 @@ func interceptSource(ruleID int64, reason string) string {
 	if ruleID != 0 {
 		return "rule"
 	}
-	if strings.HasPrefix(reason, "[模型]") {
+	if strings.HasPrefix(reason, modelReasonPrefix) || strings.HasPrefix(reason, legacyModelReasonPrefix) {
 		return "model"
 	}
 	return "unknown"
